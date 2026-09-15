@@ -1,0 +1,21 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Environment Variables
+.env
+.env.*
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# FastAPI / Starlette / Server logs (Optional)
+*.log
+
+# OS & IDE Files (Recommended)
+.DS_Store
+.vscode/
+.idea/
