@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 # Updated Deepgram SDK Imports for v3.x+
 # Updated imports compatible across Deepgram SDK v3.x versions
 from deepgram import DeepgramClient
-
+from deepgram import LiveOptions, LiveTranscriptionEvents
 # Load environment variables
 load_dotenv()
 
@@ -278,6 +278,7 @@ async def twilio_voice_webhook(CallSid: str = Form(...)):
     
     return Response(content=twiml_content, media_type="text/xml")
 
+
 @app.websocket("/wss/media")
 async def media_stream_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -287,6 +288,55 @@ async def media_stream_websocket(websocket: WebSocket):
     call_sid = None
     session = None
     loop = asyncio.get_running_loop()
+
+    # 1. Initialize Deepgram Connection
+    dg_connection = deepgram_client.listen.websocket.v("1")
+
+    # Sync handler callback for Deepgram events to avoid loop lockups
+    def on_transcript(self, result, **kwargs):
+        nonlocal session
+        try:
+            sentence = result.channel.alternatives[0].transcript
+            if not sentence.strip():
+                return
+
+            logger.info(f" <- [DEEPGRAM STT] Live Text: '{sentence}' (Is Final: {result.is_final})")
+
+            if session and session.get("is_speaking"):
+                session["interrupt_flag"] = True
+                asyncio.run_coroutine_threadsafe(send_clear_buffer(), loop)
+
+            if result.is_final:
+                detected_lang = getattr(result.channel, "detected_language", None)
+                asyncio.run_coroutine_threadsafe(
+                    process_user_utterance(sentence, detected_lang), loop
+                )
+        except Exception as err:
+            logger.error(f" !! [DEEPGRAM PARSE ERROR]: {err}")
+
+    # Register event handler safely
+    dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
+
+    # 2. Configure LiveOptions object explicitly
+    options = LiveOptions(
+        model="nova-2",
+        language="hi",
+        detect_language=True,
+        encoding="mulaw",
+        sample_rate=8000,
+        channels=1,
+        interim_results=True,
+        endpointing=300
+    )
+
+    # Run connection check in executor to prevent loop thread lockup
+    connected = await loop.run_in_executor(None, lambda: dg_connection.start(options))
+    if not connected:
+        logger.error(" !! [DEEPGRAM ERROR] Could not establish live client connection.")
+        await websocket.close()
+        return
+
+    logger.info(" == [DEEPGRAM STT] Listening for audio streaming...")
 
     async def stream_audio_to_twilio(pcm_16k_audio: bytes):
         nonlocal session, stream_sid
@@ -316,7 +366,6 @@ async def media_stream_websocket(websocket: WebSocket):
             await asyncio.sleep(0.018)
 
         session["is_speaking"] = False
-        logger.info(" <- [AUDIO OUT] Finished sending audio chunk.")
 
     async def send_clear_buffer():
         if stream_sid:
@@ -340,52 +389,6 @@ async def media_stream_websocket(websocket: WebSocket):
         pcm_audio = await text_to_speech_sarvam(assistant_reply, session["current_language"])
         if pcm_audio:
             await stream_audio_to_twilio(pcm_audio)
-            
-        if "[CALL_END]" in assistant_reply:
-            logger.info(" == [CALL END] Signal detected in reply. Closing call...")
-            await asyncio.sleep(2.0)
-            if twilio_client and call_sid:
-                twilio_client.calls(call_sid).update(status="completed")
-
-    dg_connection = deepgram_client.listen.websocket.v("1")
-
-    async def on_transcript(self, result, **kwargs):
-        nonlocal session
-        sentence = result.channel.alternatives[0].transcript
-        if not sentence.strip():
-            return
-
-        logger.info(f" <- [DEEPGRAM STT] Received transcript snippet: '{sentence}' (Is Final: {result.is_final})")
-
-        if session and session.get("is_speaking"):
-            session["interrupt_flag"] = True
-            asyncio.run_coroutine_threadsafe(send_clear_buffer(), loop)
-
-        if result.is_final:
-            detected_lang = getattr(result.channel, "detected_language", None)
-            asyncio.run_coroutine_threadsafe(
-                process_user_utterance(sentence, detected_lang), loop
-            )
-
-    dg_connection.on("Transcript", on_transcript)
-
-    options = {
-        "model": "nova-2",
-        "language": "hi",
-        "detect_language": True,
-        "encoding": "mulaw",
-        "sample_rate": 8000,
-        "channels": 1,
-        "interim_results": False,
-        "endpointing": 300
-    }
-
-    if not dg_connection.start(options):
-        logger.error(" !! [DEEPGRAM ERROR] Failed to connect live client.")
-        await websocket.close()
-        return
-
-    logger.info(" == [DEEPGRAM STT] Connected successfully.")
 
     try:
         while True:
@@ -414,7 +417,7 @@ async def media_stream_websocket(websocket: WebSocket):
                     }
                     sessions[call_sid] = session
 
-                logger.info(f" == [STREAM START] Stream SID: {stream_sid} for Call SID: {call_sid}")
+                logger.info(f" == [STREAM START] Stream SID: {stream_sid} | Call SID: {call_sid}")
 
                 proj_name = session["project"].name
                 initial_greeting = f"नमस्ते! मैं {proj_name} के बारे में बात करने के लिए कॉल कर रहा हूँ। क्या अभी बात करने का सही समय है?"
@@ -427,10 +430,9 @@ async def media_stream_websocket(websocket: WebSocket):
             elif event == "media":
                 payload = data["media"]["payload"]
                 audio_bytes = base64.b64decode(payload)
-                if hasattr(dg_connection, "send_raw"):
-                    dg_connection.send_raw(audio_bytes)
-                else:
-                    dg_connection.send(audio_bytes)
+                
+                # Send raw bytes to Deepgram STT
+                dg_connection.send(audio_bytes)
 
             elif event == "stop":
                 logger.info(f" == [STREAM STOP] Call SID: {call_sid}")
