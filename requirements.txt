@@ -4,6 +4,7 @@ twilio
 websockets
 httpx
 python-dotenv
+python-multipart
 openai
 deepgram-sdk==3.9.0
 audioop-lts; python_version >= '3.13'
