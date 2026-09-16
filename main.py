@@ -264,15 +264,19 @@ async def twilio_voice_webhook(CallSid: str = Form(...)):
     logger.info(f" -> [TWILIO WEBHOOK] Call Sid: {CallSid}")
     logger.info(f" -> [TWILIO WEBHOOK] Target WebSocket URL: {wss_url}")
     
-    twiml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="{wss_url}">
-            <Parameter name="callSid" value="{CallSid}" />
-        </Stream>
-    </Connect>
-</Response>"""
-    return Response(content=twiml_content, media_type="application/xml")
+    # Clean TwiML structure without extra spaces or linebreaks
+    twiml_content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Response>'
+            '<Connect>'
+                f'<Stream url="{wss_url}">'
+                    f'<Parameter name="callSid" value="{CallSid}" />'
+                '</Stream>'
+            '</Connect>'
+        '</Response>'
+    )
+    
+    return Response(content=twiml_content, media_type="text/xml")
 
 @app.websocket("/wss/media")
 async def media_stream_websocket(websocket: WebSocket):
