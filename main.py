@@ -256,15 +256,17 @@ async def initiate_call(request: CallRequest):
     except Exception as e:
         logger.error(f"Failed to trigger call: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/twilio/voice", tags=["Twilio Webhook"])
 async def twilio_voice_webhook(CallSid: str = Form(...)):
     """Twilio Webhook endpoint returning TwiML to start Media Streaming."""
-    wss_url = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/wss/media"
+    # Ensure scheme explicitly converts to wss://
+    base_domain = PUBLIC_BASE_URL.replace("https://", "").replace("http://", "")
+    wss_url = f"wss://{base_domain}/wss/media"
     
     logger.info(f" -> [TWILIO WEBHOOK] Call Sid: {CallSid}")
     logger.info(f" -> [TWILIO WEBHOOK] Target WebSocket URL: {wss_url}")
     
-    # Clean TwiML structure without extra spaces or linebreaks
     twiml_content = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Response>'
@@ -276,7 +278,7 @@ async def twilio_voice_webhook(CallSid: str = Form(...)):
         '</Response>'
     )
     
-    return Response(content=twiml_content, media_type="text/xml")
+    return Response(content=twiml_content, media_type="application/xml")
 
 
 @app.websocket("/wss/media")
