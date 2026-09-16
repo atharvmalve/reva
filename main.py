@@ -143,26 +143,33 @@ RULES:
 CONVERSATION STYLE:
 - Short sentences. No bullet points. No markdown. No emojis. No long lists.
 """
+# ------------------------------------------------------------------------------
+# Helper Services with Detailed Logging
+# ------------------------------------------------------------------------------
 
 async def query_llm(session: dict, user_text: str) -> str:
-    """Queries Groq GPT-OSS-20B for response generation."""
+    """Queries Groq GPT for response generation."""
     session["messages"].append({"role": "user", "content": user_text})
-    
     system_prompt = build_system_prompt(session["project"], session["current_language"])
     full_messages = [{"role": "system", "content": system_prompt}] + session["messages"][-12:]
     
+    logger.info(f" -> [GROQ LLM] Sending prompt ({len(full_messages)} msgs) for lang: {session['current_language']}")
+    
     try:
+        start_time = asyncio.get_event_loop().time()
         response = await groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=full_messages,
             temperature=0.4,
             max_tokens=150
         )
+        elapsed = asyncio.get_event_loop().time() - start_time
         reply = response.choices[0].message.content.strip()
         session["messages"].append({"role": "assistant", "content": reply})
+        logger.info(f" <- [GROQ LLM] Received response in {elapsed:.2f}s: '{reply}'")
         return reply
     except Exception as e:
-        logger.error(f"Groq LLM Error: {e}")
+        logger.error(f" !! [GROQ LLM ERROR]: {e}")
         return "एक क्षण, मुझे थोड़ी तकनीकी परेशानी हो रही है।"
 
 async def text_to_speech_sarvam(text: str, language_code: str) -> Optional[bytes]:
@@ -184,17 +191,24 @@ async def text_to_speech_sarvam(text: str, language_code: str) -> Optional[bytes
         "model": "bulbul:v3"
     }
     
+    logger.info(f" -> [SARVAM TTS] Requesting audio for text: '{text}' (Lang: {language_code})")
+    
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
+            start_time = asyncio.get_event_loop().time()
             res = await client.post(url, json=payload, headers=headers)
+            elapsed = asyncio.get_event_loop().time() - start_time
+            
             if res.status_code == 200:
                 data = res.json()
                 audio_b64 = data.get("audios", [None])[0]
                 if audio_b64:
-                    return base64.b64decode(audio_b64)
-            logger.error(f"Sarvam TTS Failed [{res.status_code}]: {res.text}")
+                    raw_audio = base64.b64decode(audio_b64)
+                    logger.info(f" <- [SARVAM TTS] Received {len(raw_audio)} bytes in {elapsed:.2f}s")
+                    return raw_audio
+            logger.error(f" !! [SARVAM TTS FAILED] [{res.status_code}]: {res.text}")
         except Exception as e:
-            logger.error(f"Sarvam TTS Exception: {e}")
+            logger.error(f" !! [SARVAM TTS EXCEPTION]: {e}")
     return None
 
 # ------------------------------------------------------------------------------
@@ -242,11 +256,13 @@ async def initiate_call(request: CallRequest):
     except Exception as e:
         logger.error(f"Failed to trigger call: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/twilio/voice", tags=["Twilio Webhook"])
 async def twilio_voice_webhook(CallSid: str = Form(...)):
     """Twilio Webhook endpoint returning TwiML to start Media Streaming."""
     wss_url = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/wss/media"
+    
+    logger.info(f" -> [TWILIO WEBHOOK] Call Sid: {CallSid}")
+    logger.info(f" -> [TWILIO WEBHOOK] Target WebSocket URL: {wss_url}")
     
     twiml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -258,14 +274,10 @@ async def twilio_voice_webhook(CallSid: str = Form(...)):
 </Response>"""
     return Response(content=twiml_content, media_type="application/xml")
 
-# ------------------------------------------------------------------------------
-# Twilio Media Streams + Deepgram Real-Time Pipeline
-# ------------------------------------------------------------------------------
-
 @app.websocket("/wss/media")
 async def media_stream_websocket(websocket: WebSocket):
     await websocket.accept()
-    logger.info("Twilio Media Stream WebSocket Connected.")
+    logger.info(" == [WEBSOCKET CONNECTED] Twilio Media Stream established.")
 
     stream_sid = None
     call_sid = None
@@ -283,9 +295,10 @@ async def media_stream_websocket(websocket: WebSocket):
         mulaw_audio = pcm16k_to_mulaw8k(pcm_16k_audio)
         chunk_size = 160  # 20ms @ 8kHz mulaw
         
+        logger.info(f" -> [AUDIO OUT] Streaming {len(mulaw_audio)} mulaw bytes to Twilio...")
         for i in range(0, len(mulaw_audio), chunk_size):
             if session.get("interrupt_flag"):
-                logger.info("Barge-in: Interrupting outbound audio stream.")
+                logger.info(" !! [BARGE-IN] Interrupted outbound stream.")
                 break
 
             chunk = mulaw_audio[i:i + chunk_size]
@@ -299,6 +312,7 @@ async def media_stream_websocket(websocket: WebSocket):
             await asyncio.sleep(0.018)
 
         session["is_speaking"] = False
+        logger.info(" <- [AUDIO OUT] Finished sending audio chunk.")
 
     async def send_clear_buffer():
         if stream_sid:
@@ -313,27 +327,22 @@ async def media_stream_websocket(websocket: WebSocket):
         if detected_lang and detected_lang in LANGUAGE_MAP:
             mapped_lang = LANGUAGE_MAP[detected_lang]
             if mapped_lang != session["current_language"]:
-                logger.info(f"Language switch detected: {session['current_language']} -> {mapped_lang}")
+                logger.info(f" == [LANG SWITCH] {session['current_language']} -> {mapped_lang}")
                 session["current_language"] = mapped_lang
 
-        logger.info(f"User [{session['current_language']}]: {transcript}")
+        logger.info(f" == [USER TRANSCRIPT] [{session['current_language']}]: '{transcript}'")
 
         assistant_reply = await query_llm(session, transcript)
-        logger.info(f"Assistant: {assistant_reply}")
-
         pcm_audio = await text_to_speech_sarvam(assistant_reply, session["current_language"])
         if pcm_audio:
             await stream_audio_to_twilio(pcm_audio)
             
         if "[CALL_END]" in assistant_reply:
-            logger.info("Call end condition met. Closing call...")
+            logger.info(" == [CALL END] Signal detected in reply. Closing call...")
             await asyncio.sleep(2.0)
             if twilio_client and call_sid:
                 twilio_client.calls(call_sid).update(status="completed")
 
-    # Updated for Deepgram SDK v3.x WebSocket API
-    # Set up Deepgram v3 streaming client
-    # Set up Deepgram v3 streaming client
     dg_connection = deepgram_client.listen.websocket.v("1")
 
     async def on_transcript(self, result, **kwargs):
@@ -342,23 +351,20 @@ async def media_stream_websocket(websocket: WebSocket):
         if not sentence.strip():
             return
 
+        logger.info(f" <- [DEEPGRAM STT] Received transcript snippet: '{sentence}' (Is Final: {result.is_final})")
+
         if session and session.get("is_speaking"):
             session["interrupt_flag"] = True
             asyncio.run_coroutine_threadsafe(send_clear_buffer(), loop)
 
         if result.is_final:
-            detected_lang = None
-            if hasattr(result, "channel") and hasattr(result.channel, "detected_language"):
-                detected_lang = result.channel.detected_language
-            
+            detected_lang = getattr(result.channel, "detected_language", None)
             asyncio.run_coroutine_threadsafe(
                 process_user_utterance(sentence, detected_lang), loop
             )
 
-    # Use string literal event listener to avoid import requirements
     dg_connection.on("Transcript", on_transcript)
 
-    # Dictionary options work across all v3.x versions
     options = {
         "model": "nova-2",
         "language": "hi",
@@ -371,9 +377,11 @@ async def media_stream_websocket(websocket: WebSocket):
     }
 
     if not dg_connection.start(options):
-        logger.error("Failed to connect to Deepgram STT.")
+        logger.error(" !! [DEEPGRAM ERROR] Failed to connect live client.")
         await websocket.close()
         return
+
+    logger.info(" == [DEEPGRAM STT] Connected successfully.")
 
     try:
         while True:
@@ -402,7 +410,7 @@ async def media_stream_websocket(websocket: WebSocket):
                     }
                     sessions[call_sid] = session
 
-                logger.info(f"Stream started SID: {stream_sid} for Call SID: {call_sid}")
+                logger.info(f" == [STREAM START] Stream SID: {stream_sid} for Call SID: {call_sid}")
 
                 proj_name = session["project"].name
                 initial_greeting = f"नमस्ते! मैं {proj_name} के बारे में बात करने के लिए कॉल कर रहा हूँ। क्या अभी बात करने का सही समय है?"
@@ -415,26 +423,23 @@ async def media_stream_websocket(websocket: WebSocket):
             elif event == "media":
                 payload = data["media"]["payload"]
                 audio_bytes = base64.b64decode(payload)
-                
-                # Compatible with Deepgram v3 streaming API
                 if hasattr(dg_connection, "send_raw"):
                     dg_connection.send_raw(audio_bytes)
                 else:
                     dg_connection.send(audio_bytes)
 
             elif event == "stop":
-                logger.info(f"Stream stopped for Call SID: {call_sid}")
+                logger.info(f" == [STREAM STOP] Call SID: {call_sid}")
                 break
 
     except WebSocketDisconnect:
-        logger.info("Twilio WebSocket disconnected.")
+        logger.info(" == [WEBSOCKET] Twilio disconnected.")
     except Exception as e:
-        logger.error(f"WebSocket Error: {e}")
+        logger.error(f" !! [WEBSOCKET ERROR]: {e}")
     finally:
         dg_connection.finish()
         if call_sid in sessions:
             del sessions[call_sid]
-
 # ------------------------------------------------------------------------------
 # Entrypoint execution
 # ------------------------------------------------------------------------------
