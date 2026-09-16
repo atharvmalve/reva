@@ -14,11 +14,14 @@ from pydantic import BaseModel, Field
 
 from twilio.rest import Client as TwilioClient
 from openai import AsyncOpenAI
-from deepgram import (
-    DeepgramClient,
-    LiveTranscriptionEvents,
-    LiveOptions,
-)
+
+# Updated Deepgram SDK Imports for v3.x+
+# Updated imports compatible across Deepgram SDK v3.x versions
+from deepgram import DeepgramClient
+try:
+    from deepgram.clients.live.v1 import LiveOptions
+except ImportError:
+    from deepgram import LiveOptions
 
 # Load environment variables
 load_dotenv()
@@ -90,7 +93,7 @@ class CallResponse(BaseModel):
 # ------------------------------------------------------------------------------
 
 def mulaw8k_to_pcm16k(mulaw_bytes: bytes) -> bytes:
-    """Converts 8kHz μ-law audio (from Twilio) to 16kHz linear PCM (for Sarvam/Deepgram)."""
+    """Converts 8kHz μ-law audio (from Twilio) to 16kHz linear PCM."""
     pcm_8k = audioop.ulaw2lin(mulaw_bytes, 2)
     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
     return pcm_16k
@@ -149,7 +152,6 @@ async def query_llm(session: dict, user_text: str) -> str:
     """Queries Groq GPT-OSS-20B for response generation."""
     session["messages"].append({"role": "user", "content": user_text})
     
-    # Refresh system prompt with active language state
     system_prompt = build_system_prompt(session["project"], session["current_language"])
     full_messages = [{"role": "system", "content": system_prompt}] + session["messages"][-12:]
     
@@ -224,7 +226,6 @@ async def initiate_call(request: CallRequest):
             url=webhook_url
         )
         
-        # Initialize session state stored by Call SID
         sessions[call.sid] = {
             "call_sid": call.sid,
             "stream_sid": None,
@@ -275,7 +276,6 @@ async def media_stream_websocket(websocket: WebSocket):
     session = None
     loop = asyncio.get_running_loop()
 
-    # Audio Playback helper
     async def stream_audio_to_twilio(pcm_16k_audio: bytes):
         nonlocal session, stream_sid
         if not stream_sid or not session:
@@ -284,7 +284,6 @@ async def media_stream_websocket(websocket: WebSocket):
         session["is_speaking"] = True
         session["interrupt_flag"] = False
 
-        # Convert 16kHz PCM to 8kHz μ-law for Twilio
         mulaw_audio = pcm16k_to_mulaw8k(pcm_16k_audio)
         chunk_size = 160  # 20ms @ 8kHz mulaw
         
@@ -301,23 +300,20 @@ async def media_stream_websocket(websocket: WebSocket):
                 "media": {"payload": payload}
             }
             await websocket.send_json(media_message)
-            await asyncio.sleep(0.018)  # Smooth streaming pulse
+            await asyncio.sleep(0.018)
 
         session["is_speaking"] = False
 
     async def send_clear_buffer():
-        """Clears Twilio queued audio buffer on interruption."""
         if stream_sid:
             clear_msg = {"event": "clear", "streamSid": stream_sid}
             await websocket.send_json(clear_msg)
 
-    # Core User Utterance Processor
     async def process_user_utterance(transcript: str, detected_lang: Optional[str]):
         nonlocal session
         if not session or not transcript.strip():
             return
 
-        # Handle Language Detection and Switching
         if detected_lang and detected_lang in LANGUAGE_MAP:
             mapped_lang = LANGUAGE_MAP[detected_lang]
             if mapped_lang != session["current_language"]:
@@ -326,11 +322,9 @@ async def media_stream_websocket(websocket: WebSocket):
 
         logger.info(f"User [{session['current_language']}]: {transcript}")
 
-        # Groq Response Generation
         assistant_reply = await query_llm(session, transcript)
         logger.info(f"Assistant: {assistant_reply}")
 
-        # Sarvam TTS Synthesis
         pcm_audio = await text_to_speech_sarvam(assistant_reply, session["current_language"])
         if pcm_audio:
             await stream_audio_to_twilio(pcm_audio)
@@ -341,8 +335,9 @@ async def media_stream_websocket(websocket: WebSocket):
             if twilio_client and call_sid:
                 twilio_client.calls(call_sid).update(status="completed")
 
-    # Initializing Deepgram STT Streaming Connection
-    dg_connection = deepgram_client.listen.live.v("1")
+    # Updated for Deepgram SDK v3.x WebSocket API
+    # Set up Deepgram v3 streaming client
+    dg_connection = deepgram_client.listen.websocket.v("1")
 
     async def on_transcript(self, result, **kwargs):
         nonlocal session
@@ -350,7 +345,6 @@ async def media_stream_websocket(websocket: WebSocket):
         if not sentence.strip():
             return
 
-        # Barge-in Trigger: Caller speaks while AI is talking
         if session and session.get("is_speaking"):
             session["interrupt_flag"] = True
             asyncio.run_coroutine_threadsafe(send_clear_buffer(), loop)
@@ -360,12 +354,12 @@ async def media_stream_websocket(websocket: WebSocket):
             if hasattr(result, "channel") and hasattr(result.channel, "detected_language"):
                 detected_lang = result.channel.detected_language
             
-            # Fire conversation processing task
             asyncio.run_coroutine_threadsafe(
                 process_user_utterance(sentence, detected_lang), loop
             )
 
-    dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
+    # Use string literal for the transcript event to avoid import errors
+    dg_connection.on("Transcript", on_transcript)
 
     options = LiveOptions(
         model="nova-2",
@@ -394,7 +388,6 @@ async def media_stream_websocket(websocket: WebSocket):
                 custom_params = data["start"].get("customParameters", {})
                 call_sid = custom_params.get("callSid")
                 
-                # Fetch matching call session state
                 if call_sid in sessions:
                     session = sessions[call_sid]
                     session["stream_sid"] = stream_sid
@@ -413,7 +406,6 @@ async def media_stream_websocket(websocket: WebSocket):
 
                 logger.info(f"Stream started SID: {stream_sid} for Call SID: {call_sid}")
 
-                # Deliver Initial Greeting in Hindi
                 proj_name = session["project"].name
                 initial_greeting = f"नमस्ते! मैं {proj_name} के बारे में बात करने के लिए कॉल कर रहा हूँ। क्या अभी बात करने का सही समय है?"
                 session["messages"].append({"role": "assistant", "content": initial_greeting})
@@ -423,10 +415,14 @@ async def media_stream_websocket(websocket: WebSocket):
                     asyncio.create_task(stream_audio_to_twilio(greeting_audio))
 
             elif event == "media":
-                # Forward μ-law phone audio straight to Deepgram
                 payload = data["media"]["payload"]
                 audio_bytes = base64.b64decode(payload)
-                dg_connection.send(audio_bytes)
+                
+                # Compatible with Deepgram v3 streaming API
+                if hasattr(dg_connection, "send_raw"):
+                    dg_connection.send_raw(audio_bytes)
+                else:
+                    dg_connection.send(audio_bytes)
 
             elif event == "stop":
                 logger.info(f"Stream stopped for Call SID: {call_sid}")
