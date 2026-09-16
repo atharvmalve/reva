@@ -730,7 +730,7 @@ JSON RESPONSE FORMAT:
   "language": "hinglish|hindi|marathi|english",
   "next_state": "GREETING|DISCOVERY|PROPERTY_PRESENTATION|OBJECTION_HANDLING|VISIT_PROPOSAL|VISIT_CONFIRMATION|HUMAN_HANDOFF|COMPLETED",
   "intent": "<INQUIRY_INTENT>",
-  "pronunciation_terms": [{"original": "3BHK", "spoken_form": "three B-H-K"}],
+  "pronunciation_terms": [{{"original": "3BHK", "spoken_form": "three B-H-K"}}],
   "tool_action": null | {{"tool_name": "<tool>", "arguments": {{}}}},
   "needs_clarification": false,
   "handoff_required": false
