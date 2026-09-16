@@ -18,10 +18,6 @@ from openai import AsyncOpenAI
 # Updated Deepgram SDK Imports for v3.x+
 # Updated imports compatible across Deepgram SDK v3.x versions
 from deepgram import DeepgramClient
-try:
-    from deepgram.clients.live.v1 import LiveOptions
-except ImportError:
-    from deepgram import LiveOptions
 
 # Load environment variables
 load_dotenv()
@@ -337,6 +333,7 @@ async def media_stream_websocket(websocket: WebSocket):
 
     # Updated for Deepgram SDK v3.x WebSocket API
     # Set up Deepgram v3 streaming client
+    # Set up Deepgram v3 streaming client
     dg_connection = deepgram_client.listen.websocket.v("1")
 
     async def on_transcript(self, result, **kwargs):
@@ -358,19 +355,20 @@ async def media_stream_websocket(websocket: WebSocket):
                 process_user_utterance(sentence, detected_lang), loop
             )
 
-    # Use string literal for the transcript event to avoid import errors
+    # Use string literal event listener to avoid import requirements
     dg_connection.on("Transcript", on_transcript)
 
-    options = LiveOptions(
-        model="nova-2",
-        language="hi",
-        detect_language=True,
-        encoding="mulaw",
-        sample_rate=8000,
-        channels=1,
-        interim_results=False,
-        endpointing=300
-    )
+    # Dictionary options work across all v3.x versions
+    options = {
+        "model": "nova-2",
+        "language": "hi",
+        "detect_language": True,
+        "encoding": "mulaw",
+        "sample_rate": 8000,
+        "channels": 1,
+        "interim_results": False,
+        "endpointing": 300
+    }
 
     if not dg_connection.start(options):
         logger.error("Failed to connect to Deepgram STT.")
