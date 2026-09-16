@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
-    APP_PORT: int = 8000
+    APP_PORT: int = int(os.getenv("PORT", 8000))  # Correctly reads Render's dynamic PORT
     LOG_LEVEL: str = "INFO"
     
     # LLM
@@ -297,6 +297,7 @@ def get_default_agency_config() -> AgencyConfigResponse:
             developer_name="Pinnacle Group",
             contact_phone="+912099998888",
             contact_email="sales@pinnacle.com",
+            office_address="101 Business Tower, Baner, Pune",
             project_name="Pinnacle Grandeur",
             project_address="Baner High Street, Pune",
             project_description="Ultra-luxury 2 and 3 BHK residential apartments with premium amenities.",
