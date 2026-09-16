@@ -5,5 +5,5 @@ websockets
 httpx
 python-dotenv
 openai
-deepgram-sdk
+deepgram-sdk==3.9.0
 audioop-lts; python_version >= '3.13'
